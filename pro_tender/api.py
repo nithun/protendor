@@ -353,8 +353,278 @@ RETURN ONLY JSON ARRAY (no markdown):
     
     return json.loads(text.strip())
 
-
 def generate_document_with_gemini(template_content, qa_data, analysis_result):
+    """Generate final specification document with comprehensive cleanup"""
+    model = get_gemini_client()
+    
+    # Step 1: Extract specific values from all available data
+    found_info = analysis_result.get('found_info', {})
+    user_answers = {item['question']: item['answer'] for item in qa_data}
+    
+    prompt_extract = f"""
+You are processing data for a Malaysian Government tender document. Extract specific values from the information provided.
+
+INFORMATION FROM APPROVAL DOCUMENTS:
+{json.dumps(found_info, indent=2, ensure_ascii=False)}
+
+USER PROVIDED ANSWERS:
+{json.dumps(user_answers, indent=2, ensure_ascii=False)}
+
+YOUR TASK:
+Extract and return specific values needed to fill the tender template. Use information from BOTH sources above.
+
+RETURN ONLY JSON (no markdown):
+{{
+    "tender_title_full": "Complete tender title in UPPER CASE Malay (e.g., PERKHIDMATAN SOKONGAN OPERASI DAN PENYELENGGARAAN...)",
+    "tender_title_short": "Short version if different",
+    "hospital_name": "Hospital name or code (e.g., HMIRI, Hospital Kuala Lumpur)",
+    "hospital_full_name": "Full hospital name (e.g., Hospital Miri)",
+    "state": "State name (e.g., Sarawak, Johor, Selangor)",
+    "contract_duration_months": "Contract duration (e.g., 24, 30, 36)",
+    "contract_year": "Year (e.g., 2025)",
+    "is_fta_compliant": true or false,
+    "involves_software": true or false,
+    "involves_hardware": true or false,
+    "involves_network": true or false,
+    "involves_applications": true or false,
+    "bank_statement_months": "Three months before closing (e.g., Jun 2025, Julai 2025 dan Ogos 2025)",
+    "financial_years_single": "Last financial year (e.g., 2024 atau 2023)",
+    "financial_years_triple": "Last 3 financial years (e.g., 2022, 2023 dan 2024 atau 2021, 2022 dan 2023)",
+    "working_hours": "Working hours for the state (e.g., 8.00 pagi hingga 5.00 petang pada hari Isnin hingga Jumaat)",
+    "procurement_branch": "Procurement branch name (e.g., Cawangan Perolehan Dan Aset, Jabatan Kesihatan Negeri Sarawak)",
+    "mof_codes_list": ["210101", "210102", "210103"],
+    "tender_closing_date": "Closing date if available",
+    "website_url": "Ministry website (e.g., https://moh.gov.my)",
+    "system_code": "System code if applicable (e.g., TPC-OHCIS, HMIRI)",
+    "system_full_name": "Full system name if applicable"
+}}
+
+If any information is not available, use reasonable defaults based on the context.
+"""
+    
+    response = model.generate_content(prompt_extract)
+    extracted_text = response.text.strip()
+    
+    # Clean JSON
+    if '```json' in extracted_text:
+        extracted_text = extracted_text.split('```json')[1].split('```')[0]
+    elif '```' in extracted_text:
+        extracted_text = extracted_text.split('```')[1].split('```')[0]
+    
+    try:
+        values = json.loads(extracted_text.strip())
+    except:
+        frappe.log_error(f"JSON Parse Error: {extracted_text}")
+        values = {}
+    
+    # Step 2: Fill template with Python string replacement
+    filled = template_content
+    
+    # === PHASE 1: Replace all tender title variations ===
+    if values.get('tender_title_full'):
+        title = values['tender_title_full']
+        
+        # Replace all variations of tender title placeholders
+        replacements = [
+            ('{ ****TAJUK**** TENDER }', title),
+            ('{****TAJUK**** TENDER}', title),
+            ('{ TAJUK TENDER }', title),
+            ('{TAJUK TENDER}', title),
+            ('**{TAJUK TENDER}**', f"**{title}**"),
+            ('**{ TAJUK TENDER }**', f"**{title}**"),
+            ('****{ TAJUK TENDER }**', f"**{title}**"),
+        ]
+        
+        for old, new in replacements:
+            filled = filled.replace(old, new)
+    
+    # === PHASE 2: Remove duplicate sections ===
+    # Remove section between "# <-- data need to be insert -->" that appears near the top
+    # This handles the duplicate tender title section
+    lines = filled.split('\n')
+    cleaned_lines = []
+    skip_mode = False
+    skip_line_count = 0
+    
+    for i, line in enumerate(lines):
+        # Detect start of data insert block
+        if '# <-- data need to be insert -->' in line or '# <--data need to be insert -->' in line:
+            # Check if this is a duplicate section (appears early in document)
+            if i < 20:  # If within first 20 lines, it's likely the duplicate
+                skip_mode = True
+                skip_line_count = 0
+                continue
+        
+        # Detect end of data insert block
+        if skip_mode and ('# <-- End data need to be insert-->' in line or '# <-- end data need to be insert-->' in line):
+            skip_mode = False
+            continue
+        
+        # Skip lines in skip mode
+        if skip_mode:
+            skip_line_count += 1
+            if skip_line_count > 10:  # Safety: don't skip more than 10 lines
+                skip_mode = False
+            continue
+        
+        cleaned_lines.append(line)
+    
+    filled = '\n'.join(cleaned_lines)
+    
+    # === PHASE 3: Replace specific data points ===
+    
+    # Year
+    if values.get('contract_year'):
+        year = values['contract_year']
+        filled = re.sub(r'\*\*\d{4}\s*\*\*', f"**{year}**", filled)
+        filled = re.sub(r'\*\*\d{4}\*\*', f"**{year}**", filled)
+    
+    # Procurement branch
+    if values.get('procurement_branch'):
+        branch = values['procurement_branch']
+        # Replace in the PERINGATAN section
+        filled = re.sub(
+            r'(penjelasan daripada\s*\n\n\n)(.*?)(\n\n)',
+            f"\\1{branch}.\\3",
+            filled,
+            flags=re.DOTALL
+        )
+    
+    # Hospital/System code
+    if values.get('system_code'):
+        code = values['system_code']
+        filled = filled.replace("'**HMIRI**", f"'**{code}**")
+        filled = filled.replace("**HMIRI**", f"**{code}**")
+        filled = filled.replace("HMIRI", code)
+    
+    if values.get('system_full_name'):
+        full_name = values['system_full_name']
+        filled = filled.replace("**Hospital Miri**", f"**{full_name}**")
+        filled = filled.replace("Hospital Miri", full_name)
+    
+    # State
+    if values.get('state'):
+        state = values['state']
+        if state != 'Malaysia':  # Only replace if not nationwide
+            filled = filled.replace('Negeri Sarawak', f"Negeri {state}")
+            filled = filled.replace('Sarawak iaitu', f"{state} iaitu")
+            filled = filled.replace('di Negeri Sarawak', f"di Negeri {state}")
+    
+    # Bank statement months
+    if values.get('bank_statement_months'):
+        months = values['bank_statement_months']
+        filled = re.sub(
+            r'\(Jun 2025, Julai 2025 dan Ogos 2025\)',
+            f"({months})",
+            filled
+        )
+        filled = re.sub(
+            r'\(Julai 2025, Ogos 2025 dan September 2025\)',
+            f"({months})",
+            filled
+        )
+    
+    # Financial years (single)
+    if values.get('financial_years_single'):
+        years = values['financial_years_single']
+        filled = re.sub(
+            r'\(2024 atau 2023\)',
+            f"({years})",
+            filled
+        )
+    
+    # Financial years (triple) - for FTA
+    if values.get('financial_years_triple'):
+        years_triple = values['financial_years_triple']
+        filled = re.sub(
+            r'\(2022, 2023 dan 2024 atau 2021, 2022 dan 2023\)',
+            f"({years_triple})",
+            filled
+        )
+    
+    # === PHASE 4: Handle conditional sections ===
+    if not values.get('is_fta_compliant', True):
+        # Remove FTA-specific sections more aggressively
+        filled = re.sub(
+            r'# <-- options based on conditions start -->.*?# <-- end options based on conditions -->',
+            '',
+            filled,
+            flags=re.DOTALL
+        )
+        # Remove LAMPIRAN 6 for CPTPP
+        filled = re.sub(
+            r'\|\s*\*\*LAMPIRAN\s*\*\*\*\*6\*\*.*?Country Of Origin.*?\|',
+            '',
+            filled,
+            flags=re.IGNORECASE
+        )
+    
+    # Remove PAT definition if not application-related
+    if not values.get('involves_applications', False):
+        filled = re.sub(
+            r"Perkataan \*'Provisional Acceptance Test \(PAT\)'\*.*?// jika berkaitan applikasi",
+            '',
+            filled,
+            flags=re.DOTALL
+        )
+    
+    # === PHASE 5: Aggressive comment marker removal ===
+    
+    # Remove all variations of data insert markers
+    comment_patterns = [
+        r'# <--data need to be insert start-->.*?\n',
+        r'# <-- data need to be insert start-->.*?\n',
+        r'# <--data need to be insert start -->.*?\n',
+        r'# <-- data need to be insert start -->.*?\n',
+        r'# <-- End data need to be insert-->.*?\n',
+        r'# <-- end data need to be insert-->.*?\n',
+        r'# <--End data need to be insert-->.*?\n',
+        r'# <--end data need to be insert-->.*?\n',
+        r'# <-- this is instruction start-->.*?# <-- end of this instruction start-->',
+        r'# <--this is instruction start-->.*?# <--end of this instruction start-->',
+        r'# <-- options based on conditions start -->.*?\n',
+        r'# <--options based on conditions start-->.*?\n',
+        r'# <-- end options based on conditions -->.*?\n',
+        r'# <--end options based on conditions-->.*?\n',
+        r'# <-- data need to be insert -->.*?\n',
+        r'# <--data need to be insert-->.*?\n',
+    ]
+    
+    for pattern in comment_patterns:
+        filled = re.sub(pattern, '', filled, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Remove any remaining lines that start with "# <--"
+    filled = re.sub(r'^# <--.*?$', '', filled, flags=re.MULTILINE)
+    
+    # Remove HTML-style comments
+    filled = re.sub(r'<>.*?</>', '', filled, flags=re.DOTALL)
+    
+    # === PHASE 6: Clean up extra whitespace ===
+    
+    # Remove lines with only whitespace
+    filled = re.sub(r'^\s*$\n', '', filled, flags=re.MULTILINE)
+    
+    # Remove more than 3 consecutive newlines
+    filled = re.sub(r'\n{4,}', '\n\n\n', filled)
+    
+    # === PHASE 7: Final verification pass ===
+    
+    # Check for any remaining placeholders and log them
+    remaining_placeholders = re.findall(r'\{[^}]*TAJUK[^}]*\}', filled, re.IGNORECASE)
+    if remaining_placeholders:
+        frappe.log_error(f"Remaining placeholders found: {remaining_placeholders}", "Template Fill Warning")
+        # Try to replace them with the title anyway
+        if values.get('tender_title_full'):
+            for placeholder in remaining_placeholders:
+                filled = filled.replace(placeholder, values['tender_title_full'])
+    
+    # Log success
+    frappe.log(f"Document generated successfully. Length: {len(filled)} characters")
+    
+    return filled
+
+
+def generate_document_with_gemini_old(template_content, qa_data, analysis_result):
     """Generate final specification document with structured approach"""
     model = get_gemini_client()
     
