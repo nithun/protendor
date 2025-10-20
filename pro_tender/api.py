@@ -353,7 +353,458 @@ RETURN ONLY JSON ARRAY (no markdown):
     
     return json.loads(text.strip())
 
+
+def clean_markdown(content):
+    """Clean and validate markdown formatting"""
+    
+    # === PHASE 1: Fix escaped characters ===
+    
+    # Fix escaped asterisks for bold
+    content = re.sub(r'\\\*\\\*(.+?)\\\*\\\*', r'**\1**', content)
+    
+    # Fix single escaped asterisks for italic
+    content = re.sub(r'\\\*(.+?)\\\*', r'*\1*', content)
+    
+    # Fix escaped underscores
+    content = re.sub(r'\\_', '_', content)
+    
+    # Fix escaped brackets
+    content = re.sub(r'\\\[', '[', content)
+    content = re.sub(r'\\\]', ']', content)
+    
+    # Fix escaped parentheses
+    content = re.sub(r'\\\(', '(', content)
+    content = re.sub(r'\\\)', ')', content)
+    
+    # === PHASE 2: Clean malformed bold/italic ===
+    
+    # Fix patterns like **text **  (space before closing)
+    content = re.sub(r'\*\*([^*]+?)\s+\*\*', r'**\1**', content)
+    
+    # Fix patterns like ** text** (space after opening)
+    content = re.sub(r'\*\*\s+([^*]+?)\*\*', r'**\1**', content)
+    
+    # Fix incomplete bold (odd number of asterisks)
+    # Split by lines and check each line
+    lines = content.split('\n')
+    cleaned_lines = []
+    
+    for line in lines:
+        # Count asterisks - if odd, there's a problem
+        asterisk_count = line.count('**')
+        if asterisk_count % 2 != 0:
+            # Try to fix by removing last **
+            line = line[::-1].replace('**', '', 1)[::-1]
+        cleaned_lines.append(line)
+    
+    content = '\n'.join(cleaned_lines)
+    
+    # === PHASE 3: Clean tables ===
+    
+    # Fix table separators with escaped pipes
+    content = re.sub(r'\\\|', '|', content)
+    
+    # Ensure table rows have consistent column counts
+    table_lines = []
+    in_table = False
+    expected_cols = 0
+    
+    for line in content.split('\n'):
+        if '|' in line and '---' in line:
+            # Table separator line
+            in_table = True
+            expected_cols = line.count('|') - 1
+            table_lines.append(line)
+        elif '|' in line and in_table:
+            # Table content line - ensure correct column count
+            current_cols = line.count('|') - 1
+            if current_cols != expected_cols:
+                # Pad with empty cells
+                while current_cols < expected_cols:
+                    line = line.rstrip('|') + ' |'
+                    current_cols += 1
+            table_lines.append(line)
+        else:
+            if in_table:
+                in_table = False
+            table_lines.append(line)
+    
+    content = '\n'.join(table_lines)
+    
+    # === PHASE 4: Remove HTML comments ===
+    content = re.sub(r'<>.*?</>', '', content, flags=re.DOTALL)
+    content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
+    
+    # === PHASE 5: Fix headers ===
+    
+    # Ensure headers have space after #
+    content = re.sub(r'^(#{1,6})([^\s#])', r'\1 \2', content, flags=re.MULTILINE)
+    
+    # === PHASE 6: Clean whitespace ===
+    
+    # Remove trailing whitespace from lines
+    lines = content.split('\n')
+    content = '\n'.join([line.rstrip() for line in lines])
+    
+    # Normalize line endings
+    content = re.sub(r'\r\n', '\n', content)
+    
+    # Remove excessive blank lines (max 2 consecutive)
+    content = re.sub(r'\n{3,}', '\n\n', content)
+    
+    return content
+
+
+def validate_markdown(content):
+    """Validate markdown syntax and return warnings"""
+    warnings = []
+    
+    lines = content.split('\n')
+    
+    for i, line in enumerate(lines, 1):
+        # Check for unmatched bold markers
+        if line.count('**') % 2 != 0:
+            warnings.append(f"Line {i}: Unmatched bold markers (**)")
+        
+        # Check for unmatched italic markers
+        if line.count('*') % 2 != 0 and '**' not in line:
+            warnings.append(f"Line {i}: Unmatched italic markers (*)")
+        
+        # Check for escaped characters that shouldn't be
+        if r'\*\*' in line or r'\*' in line:
+            warnings.append(f"Line {i}: Contains escaped asterisks (\\*)")
+        
+        # Check table formatting
+        if '|' in line and line.strip().startswith('|'):
+            cols = line.count('|') - 1
+            if cols == 0:
+                warnings.append(f"Line {i}: Malformed table row")
+    
+    # Check for proper table structure
+    in_table = False
+    prev_cols = 0
+    
+    for i, line in enumerate(lines, 1):
+        if '|' in line and '---' in line:
+            in_table = True
+            prev_cols = line.count('|') - 1
+        elif '|' in line and in_table:
+            current_cols = line.count('|') - 1
+            if current_cols != prev_cols:
+                warnings.append(f"Line {i}: Inconsistent table columns (expected {prev_cols}, got {current_cols})")
+        elif in_table and '|' not in line:
+            in_table = False
+    
+    return warnings
+
+
+def render_markdown_test(content):
+    """Test if markdown renders correctly"""
+    try:
+        import markdown
+        
+        # Try to render
+        html = markdown.markdown(content, extensions=['tables', 'fenced_code'])
+        
+        # Check if rendering produced reasonable output
+        if len(html) < len(content) * 0.5:
+            return False, "Markdown rendering produced suspiciously short output"
+        
+        if '<p>**' in html or '<p>\\*\\*' in html:
+            return False, "Bold markers not rendered correctly"
+        
+        return True, "Markdown renders correctly"
+        
+    except Exception as e:
+        return False, f"Markdown rendering error: {str(e)}"
+
+
 def generate_document_with_gemini(template_content, qa_data, analysis_result):
+    """Generate final specification document with comprehensive cleanup and validation"""
+    model = get_gemini_client()
+    
+    # Step 1: Extract specific values from all available data
+    found_info = analysis_result.get('found_info', {})
+    user_answers = {item['question']: item['answer'] for item in qa_data}
+    
+    prompt_extract = f"""
+You are processing data for a Malaysian Government tender document. Extract specific values from the information provided.
+
+INFORMATION FROM APPROVAL DOCUMENTS:
+{json.dumps(found_info, indent=2, ensure_ascii=False)}
+
+USER PROVIDED ANSWERS:
+{json.dumps(user_answers, indent=2, ensure_ascii=False)}
+
+YOUR TASK:
+Extract and return specific values needed to fill the tender template. Use information from BOTH sources above.
+
+RETURN ONLY JSON (no markdown):
+{{
+    "tender_title_full": "Complete tender title in UPPER CASE Malay (e.g., PERKHIDMATAN SOKONGAN OPERASI...)",
+    "tender_title_short": "Short version if different",
+    "hospital_name": "Hospital name or code (e.g., HMIRI, TPC-OHCIS)",
+    "hospital_full_name": "Full hospital/system name",
+    "state": "State name or 'Seluruh Malaysia' if nationwide",
+    "contract_duration_months": "Contract duration (e.g., 24, 30, 36)",
+    "contract_year": "Year (e.g., 2025)",
+    "is_fta_compliant": true or false,
+    "involves_software": true or false,
+    "involves_hardware": true or false,
+    "involves_network": true or false,
+    "involves_applications": true or false,
+    "bank_statement_months": "Three months before closing (e.g., Julai 2025, Ogos 2025 dan September 2025)",
+    "financial_years_single": "Last financial year (e.g., 2024 atau 2023)",
+    "financial_years_triple": "Last 3 financial years (e.g., 2022, 2023 dan 2024)",
+    "working_hours": "Working hours",
+    "procurement_branch": "Procurement branch name",
+    "mof_codes_list": ["210101", "210102"],
+    "website_url": "Ministry website",
+    "system_code": "System code",
+    "system_full_name": "Full system name"
+}}
+
+If any information is not available, use reasonable defaults based on the context.
+"""
+    
+    response = model.generate_content(prompt_extract)
+    extracted_text = response.text.strip()
+    
+    # Clean JSON
+    if '```json' in extracted_text:
+        extracted_text = extracted_text.split('```json')[1].split('```')[0]
+    elif '```' in extracted_text:
+        extracted_text = extracted_text.split('```')[1].split('```')[0]
+    
+    try:
+        values = json.loads(extracted_text.strip())
+    except:
+        frappe.log_error(f"JSON Parse Error: {extracted_text}")
+        values = {}
+    
+    # Step 2: Fill template with Python string replacement
+    filled = template_content
+    
+    # === PHASE 1: Replace all tender title variations ===
+    if values.get('tender_title_full'):
+        title = values['tender_title_full']
+        
+        replacements = [
+            ('{ ****TAJUK**** TENDER }', title),
+            ('{****TAJUK**** TENDER}', title),
+            ('{ TAJUK TENDER }', title),
+            ('{TAJUK TENDER}', title),
+            ('**{TAJUK TENDER}**', f"**{title}**"),
+            ('**{ TAJUK TENDER }**', f"**{title}**"),
+            ('****{ TAJUK TENDER }**', f"**{title}**"),
+        ]
+        
+        for old, new in replacements:
+            filled = filled.replace(old, new)
+    
+    # === PHASE 2: Remove duplicate sections ===
+    lines = filled.split('\n')
+    cleaned_lines = []
+    skip_next_lines = 0
+    correct_duration = values.get('contract_duration_months', '')
+    
+    for i, line in enumerate(lines):
+        # Skip if in skip mode
+        if skip_next_lines > 0:
+            skip_next_lines -= 1
+            continue
+        
+        # Remove template example lines with different specifications
+        if '[FTA(CPTPP)]' in line and 'MENGKAJI, MERANCANG, MEREKABENTUK' in line:
+            skip_next_lines = 2
+            continue
+        
+        # Check if line contains different contract duration
+        if correct_duration and 'TEMPOH KONTRAK' in line:
+            if f"{correct_duration} BULAN" not in line and re.search(r'\d+ BULAN', line):
+                continue
+        
+        cleaned_lines.append(line)
+    
+    filled = '\n'.join(cleaned_lines)
+    
+    # === PHASE 3: Replace specific data points ===
+    
+    # Year
+    if values.get('contract_year'):
+        year = values['contract_year']
+        filled = re.sub(r'\*\*\d{4}\s*\*\*', f"**{year}**", filled)
+        filled = re.sub(r'\*\*\d{4}\*\*', f"**{year}**", filled)
+    
+    # Procurement branch
+    if values.get('procurement_branch'):
+        branch = values['procurement_branch']
+        filled = re.sub(
+            r'(penjelasan daripada\s*\n\n\n)(.*?)(\n\n)',
+            f"\\1{branch}.\\3",
+            filled,
+            flags=re.DOTALL
+        )
+    
+    # Hospital/System code
+    if values.get('system_code'):
+        code = values['system_code']
+        filled = filled.replace("'**HMIRI**", f"'**{code}**")
+        filled = filled.replace("**HMIRI**", f"**{code}**")
+        filled = filled.replace("HMIRI", code)
+    
+    if values.get('system_full_name'):
+        full_name = values['system_full_name']
+        filled = filled.replace("**Hospital Miri**", f"**{full_name}**")
+        filled = filled.replace("Hospital Miri", full_name)
+    
+    # State
+    if values.get('state'):
+        state = values['state']
+        if state not in ['Seluruh Malaysia', 'Malaysia']:
+            filled = filled.replace('Negeri Sarawak', f"Negeri {state}")
+            filled = filled.replace('Sarawak iaitu', f"{state} iaitu")
+            filled = filled.replace('di Negeri Sarawak', f"di Negeri {state}")
+    
+    # Bank statement months
+    if values.get('bank_statement_months'):
+        months = values['bank_statement_months']
+        filled = re.sub(
+            r'\((Jun|Julai|Ogos|September) 2025.*?\)',
+            f"({months})",
+            filled
+        )
+    
+    # Financial years (single)
+    if values.get('financial_years_single'):
+        years = values['financial_years_single']
+        filled = re.sub(r'\(2024 atau 2023\)', f"({years})", filled)
+    
+    # Financial years (triple) - for FTA
+    if values.get('financial_years_triple'):
+        years_triple = values['financial_years_triple']
+        filled = re.sub(
+            r'\(2022, 2023 dan 2024 atau 2021, 2022 dan 2023\)',
+            f"({years_triple})",
+            filled
+        )
+    
+    # === PHASE 4: Handle conditional sections ===
+    if not values.get('is_fta_compliant', True):
+        # Remove FTA-specific sections
+        filled = re.sub(
+            r'# <-- options based on conditions start -->.*?# <-- end options based on conditions -->',
+            '',
+            filled,
+            flags=re.DOTALL
+        )
+        # Remove LAMPIRAN 6 for CPTPP
+        filled = re.sub(
+            r'\|\s*\*\*LAMPIRAN\s*\*\*\*\*6\*\*.*?Country Of Origin.*?\|',
+            '',
+            filled,
+            flags=re.IGNORECASE
+        )
+    
+    # Remove PAT definition if not application-related
+    if not values.get('involves_applications', False):
+        filled = re.sub(
+            r"Perkataan \*'Provisional Acceptance Test \(PAT\)'\*.*?// jika berkaitan applikasi",
+            '',
+            filled,
+            flags=re.DOTALL
+        )
+    
+    # === PHASE 5: Aggressive comment marker removal ===
+    
+    comment_patterns = [
+        r'# <--data need to be insert start-->.*?\n',
+        r'# <-- data need to be insert start-->.*?\n',
+        r'# <--data need to be insert start -->.*?\n',
+        r'# <-- data need to be insert start -->.*?\n',
+        r'# <-- End data need to be insert-->.*?\n',
+        r'# <-- end data need to be insert-->.*?\n',
+        r'# <--End data need to be insert-->.*?\n',
+        r'# <--end data need to be insert-->.*?\n',
+        r'# <-- this is instruction start-->.*?# <-- end of this instruction start-->',
+        r'# <--this is instruction start-->.*?# <--end of this instruction start-->',
+        r'# <-- options based on conditions start -->.*?\n',
+        r'# <--options based on conditions start-->.*?\n',
+        r'# <-- end options based on conditions -->.*?\n',
+        r'# <--end options based on conditions-->.*?\n',
+        r'# <-- data need to be insert -->.*?\n',
+        r'# <--data need to be insert-->.*?\n',
+        r'//.*?applikasi.*?\n',
+        r'// jika.*?\n',
+    ]
+    
+    for pattern in comment_patterns:
+        filled = re.sub(pattern, '', filled, flags=re.IGNORECASE | re.DOTALL)
+    
+    # Remove any remaining lines that start with "# <--"
+    filled = re.sub(r'^# <--.*?$', '', filled, flags=re.MULTILINE)
+    
+    # Remove HTML-style comments
+    filled = re.sub(r'<>.*?</>', '', filled, flags=re.DOTALL)
+    
+    # === PHASE 6: Clean up extra whitespace ===
+    
+    # Remove lines with only whitespace
+    filled = re.sub(r'^\s*$\n', '', filled, flags=re.MULTILINE)
+    
+    # Remove more than 3 consecutive newlines
+    filled = re.sub(r'\n{4,}', '\n\n\n', filled)
+    
+    # === PHASE 7: Final verification pass ===
+    
+    # Check for any remaining placeholders
+    remaining_placeholders = re.findall(r'\{[^}]*TAJUK[^}]*\}', filled, re.IGNORECASE)
+    if remaining_placeholders:
+        frappe.log_error(f"Remaining placeholders found: {remaining_placeholders}", "Template Fill Warning")
+        if values.get('tender_title_full'):
+            for placeholder in remaining_placeholders:
+                filled = filled.replace(placeholder, values['tender_title_full'])
+    
+    # === PHASE 8: MARKDOWN CLEANUP AND VALIDATION ===
+    
+    frappe.log("Starting markdown cleanup and validation...")
+    
+    # Clean markdown formatting
+    filled = clean_markdown(filled)
+    
+    # Validate markdown
+    warnings = validate_markdown(filled)
+    if warnings:
+        # Log first 20 warnings
+        warning_text = '\n'.join(warnings[:20])
+        frappe.log_error(
+            f"Markdown validation warnings ({len(warnings)} total):\n{warning_text}", 
+            "Markdown Validation"
+        )
+        frappe.log(f"Markdown validation: {len(warnings)} warnings found")
+    else:
+        frappe.log("Markdown validation: No warnings")
+    
+    # Test rendering
+    renders_ok, render_message = render_markdown_test(filled)
+    if not renders_ok:
+        frappe.log_error(f"Markdown rendering issue: {render_message}", "Markdown Rendering")
+        frappe.log(f"Markdown rendering: FAILED - {render_message}")
+    else:
+        frappe.log(f"Markdown rendering: SUCCESS - {render_message}")
+    
+    # Final stats
+    frappe.log(
+        f"Document generated successfully: "
+        f"{len(filled)} characters, "
+        f"{len(warnings)} validation warnings, "
+        f"Renders: {renders_ok}"
+    )
+    
+    return filled
+
+
+def generate_document_with_gemini_old(template_content, qa_data, analysis_result):
     """Generate final specification document with comprehensive cleanup"""
     model = get_gemini_client()
     
@@ -623,149 +1074,6 @@ If any information is not available, use reasonable defaults based on the contex
     
     return filled
 
-
-def generate_document_with_gemini_old(template_content, qa_data, analysis_result):
-    """Generate final specification document with structured approach"""
-    model = get_gemini_client()
-    
-    # Step 1: Extract specific values from all available data
-    found_info = analysis_result.get('found_info', {})
-    user_answers = {item['question']: item['answer'] for item in qa_data}
-    
-    prompt_extract = f"""
-You are processing data for a Malaysian Government tender document. Extract specific values from the information provided.
-
-INFORMATION FROM APPROVAL DOCUMENTS:
-{json.dumps(found_info, indent=2, ensure_ascii=False)}
-
-USER PROVIDED ANSWERS:
-{json.dumps(user_answers, indent=2, ensure_ascii=False)}
-
-YOUR TASK:
-Extract and return specific values needed to fill the tender template. Use information from BOTH sources above.
-
-RETURN ONLY JSON (no markdown):
-{{
-    "tender_title_full": "Complete tender title in UPPER CASE Malay (e.g., PERKHIDMATAN SOKONGAN OPERASI DAN PENYELENGGARAAN...)",
-    "hospital_name": "Hospital name or code (e.g., HMIRI, Hospital Kuala Lumpur)",
-    "hospital_full_name": "Full hospital name (e.g., Hospital Miri)",
-    "state": "State name (e.g., Sarawak, Johor, Selangor)",
-    "contract_duration_months": "Contract duration (e.g., 24, 30, 36)",
-    "contract_year": "Year (e.g., 2025)",
-    "is_fta_compliant": true or false,
-    "involves_software": true or false,
-    "involves_hardware": true or false,
-    "involves_network": true or false,
-    "involves_applications": true or false,
-    "bank_statement_months": "Three months before closing (e.g., Jun 2025, Julai 2025 dan Ogos 2025)",
-    "financial_years_single": "Last financial year (e.g., 2024 atau 2023)",
-    "financial_years_triple": "Last 3 financial years (e.g., 2022, 2023 dan 2024 atau 2021, 2022 dan 2023)",
-    "working_hours": "Working hours for the state (e.g., 8.00 pagi hingga 5.00 petang pada hari Isnin hingga Jumaat)",
-    "procurement_branch": "Procurement branch name (e.g., Cawangan Perolehan Dan Aset, Jabatan Kesihatan Negeri Sarawak)",
-    "mof_codes_list": ["210101", "210102", "210103"],
-    "tender_closing_date": "Closing date if available",
-    "website_url": "Ministry website (e.g., https://moh.gov.my)"
-}}
-
-If any information is not available, use reasonable defaults based on the context.
-"""
-    
-    response = model.generate_content(prompt_extract)
-    extracted_text = response.text.strip()
-    
-    # Clean JSON
-    if '```json' in extracted_text:
-        extracted_text = extracted_text.split('```json')[1].split('```')[0]
-    elif '```' in extracted_text:
-        extracted_text = extracted_text.split('```')[1].split('```')[0]
-    
-    try:
-        values = json.loads(extracted_text.strip())
-    except:
-        frappe.log_error(f"JSON Parse Error: {extracted_text}")
-        values = {}
-    
-    # Step 2: Fill template with Python string replacement
-    filled = template_content
-    
-    # Replace main tender title placeholders
-    if values.get('tender_title_full'):
-        title = values['tender_title_full']
-        filled = filled.replace('{ ****TAJUK**** TENDER }', title)
-        filled = filled.replace('{TAJUK TENDER}', title)
-        filled = filled.replace('**{TAJUK TENDER}**', f"**{title}**")
-    
-    # Replace year
-    if values.get('contract_year'):
-        year = values['contract_year']
-        filled = re.sub(r'\*\*\d{4}\s*\*\*', f"**{year}**", filled)
-    
-    # Replace procurement branch
-    if values.get('procurement_branch'):
-        filled = filled.replace(
-            '# <-- data need to be insert start--> \nCawangan Perolehan Dan Aset, Jabatan Kesihatan Negeri Sarawak.\n# <-- end data need to be insert-->',
-            values['procurement_branch'] + '.'
-        )
-    
-    # Replace hospital code and name
-    if values.get('hospital_name'):
-        filled = filled.replace("'**HMIRI**", f"'**{values['hospital_name']}**")
-        filled = filled.replace("HMIRI", values['hospital_name'])
-    
-    if values.get('hospital_full_name'):
-        filled = filled.replace("Hospital Miri", values['hospital_full_name'])
-    
-    # Replace state
-    if values.get('state'):
-        state = values['state']
-        filled = filled.replace('Sarawak iaitu', f"{state} iaitu")
-        filled = filled.replace('Sarawak ', f"{state} ")
-        filled = filled.replace('Negeri Sarawak', f"Negeri {state}")
-    
-    # Replace bank statement months
-    if values.get('bank_statement_months'):
-        filled = filled.replace(
-            '# <--data need to be insert start-->\n(Jun 2025, Julai 2025 dan Ogos 2025)\n# <-- End data need to be insert-->',
-            f"({values['bank_statement_months']})"
-        )
-    
-    # Replace financial years (single)
-    if values.get('financial_years_single'):
-        filled = filled.replace(
-            '# <--data need to be insert start-->\n(2024 atau 2023)\n# <-- End data need to be insert-->',
-            f"({values['financial_years_single']})"
-        )
-    
-    # Replace hardware/software/network descriptions
-    if values.get('involves_hardware') or values.get('involves_software') or values.get('involves_network'):
-        equipment_desc = "peralatan fizikal termasuklah semua jenis kabel dan aksesori yang berkaitan seperti **JADUAL 2**"
-        filled = filled.replace(
-            '# <--data need to be insert start-->\nperalatan fizikal termasuklah semua jenis kabel dan aksesori yang berkaitan seperti **JADUAL 2**;\n# <-- End data need to be insert-->',
-            equipment_desc + ';'
-        )
-    
-    # Handle conditional sections
-    if not values.get('is_fta_compliant', True):
-        # Remove FTA-specific sections
-        filled = re.sub(
-            r'# <-- options based on conditions start -->.*?# <-- end options based on conditions -->',
-            '',
-            filled,
-            flags=re.DOTALL
-        )
-    
-    # Remove all comment markers
-    filled = re.sub(r'# <--data need to be insert start-->.*?\n', '', filled)
-    filled = re.sub(r'# <-- End data need to be insert-->.*?\n', '', filled)
-    filled = re.sub(r'# <-- end data need to be insert-->.*?\n', '', filled)
-    filled = re.sub(r'# <-- this is instruction start-->.*?# <-- end of this instruction start-->', '', filled, flags=re.DOTALL)
-    filled = re.sub(r'# <-- options based on conditions start -->.*?\n', '', filled)
-    filled = re.sub(r'# <-- end options based on conditions -->.*?\n', '', filled)
-    
-    # Remove any remaining HTML-style comments
-    filled = re.sub(r'<>.*?</>', '', filled, flags=re.DOTALL)
-    
-    return filled
 
 
 def save_as_markdown_file(content, filename, attached_to_doctype, attached_to_name):
