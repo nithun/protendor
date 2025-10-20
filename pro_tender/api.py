@@ -353,128 +353,104 @@ RETURN ONLY JSON ARRAY (no markdown):
     
     return json.loads(text.strip())
 
+
 def clean_markdown(content):
     """Clean and validate markdown formatting"""
     
-    # === PHASE 0: Document-specific cleanup (Notion/Word artifacts) ===
-    
-    # Remove image references
-    content = re.sub(r'!\[\]\([^\)]+\)\s*\n?', '', content)
-    
-    # Remove TOC links with about:blank
-    content = re.sub(r'\[([^\]]+)\]\(about:blank[^\)]*\)', r'\1', content)
-    
-    # Fix strikethrough (remove ~~ markers)
-    content = re.sub(r'~~([^~]*)~~', r'\1', content)
-    
     # === PHASE 1: Fix escaped characters ===
     
-    content = re.sub(r'\\\*\\\*', '**', content)
-    content = re.sub(r'\\\*', '*', content)
+    # Fix escaped asterisks for bold
+    content = re.sub(r'\\\*\\\*(.+?)\\\*\\\*', r'**\1**', content)
+    
+    # Fix single escaped asterisks for italic
+    content = re.sub(r'\\\*(.+?)\\\*', r'*\1*', content)
+    
+    # Fix escaped underscores
     content = re.sub(r'\\_', '_', content)
+    
+    # Fix escaped brackets
     content = re.sub(r'\\\[', '[', content)
     content = re.sub(r'\\\]', ']', content)
+    
+    # Fix escaped parentheses
     content = re.sub(r'\\\(', '(', content)
     content = re.sub(r'\\\)', ')', content)
-    content = re.sub(r'\\\|', '|', content)
-    content = re.sub(r'\\#', '#', content)
     
     # === PHASE 2: Clean malformed bold/italic ===
     
+    # Fix patterns like **text **  (space before closing)
     content = re.sub(r'\*\*([^*]+?)\s+\*\*', r'**\1**', content)
+    
+    # Fix patterns like ** text** (space after opening)
     content = re.sub(r'\*\*\s+([^*]+?)\*\*', r'**\1**', content)
-    content = re.sub(r'\*{3,}([^*]+?)\*{3,}', r'**\1**', content)
     
-    # === PHASE 3: Fix incomplete bold/italic markers ===
-    
+    # Fix incomplete bold (odd number of asterisks)
+    # Split by lines and check each line
     lines = content.split('\n')
     cleaned_lines = []
     
     for line in lines:
-        if re.match(r'^\s*\|[\s\-:]+\|\s*$', line):
-            cleaned_lines.append(line)
-            continue
-        
-        bold_count = len(re.findall(r'\*\*', line))
-        if bold_count % 2 != 0:
+        # Count asterisks - if odd, there's a problem
+        asterisk_count = line.count('**')
+        if asterisk_count % 2 != 0:
+            # Try to fix by removing last **
             line = line[::-1].replace('**', '', 1)[::-1]
-        
-        temp_line = line.replace('**', '__BOLD__')
-        italic_count = temp_line.count('*')
-        if italic_count % 2 != 0:
-            idx = line.rfind('*')
-            if idx != -1:
-                line = line[:idx] + line[idx+1:]
-        
         cleaned_lines.append(line)
     
     content = '\n'.join(cleaned_lines)
     
-    # === PHASE 4: Clean tables ===
+    # === PHASE 3: Clean tables ===
     
+    # Fix table separators with escaped pipes
+    content = re.sub(r'\\\|', '|', content)
+    
+    # Ensure table rows have consistent column counts
     table_lines = []
     in_table = False
     expected_cols = 0
     
     for line in content.split('\n'):
-        if '|' in line and re.search(r'[-:]{2,}', line):
+        if '|' in line and '---' in line:
+            # Table separator line
             in_table = True
             expected_cols = line.count('|') - 1
             table_lines.append(line)
         elif '|' in line and in_table:
+            # Table content line - ensure correct column count
             current_cols = line.count('|') - 1
-            if current_cols < expected_cols:
-                line = line.rstrip()
-                if not line.endswith('|'):
-                    line += ' |'
-                while line.count('|') - 1 < expected_cols:
+            if current_cols != expected_cols:
+                # Pad with empty cells
+                while current_cols < expected_cols:
                     line = line.rstrip('|') + ' |'
-            elif current_cols > expected_cols:
-                parts = line.split('|')
-                line = '|'.join(parts[:expected_cols + 2])
+                    current_cols += 1
             table_lines.append(line)
         else:
-            if in_table and '|' not in line:
+            if in_table:
                 in_table = False
-                expected_cols = 0
             table_lines.append(line)
     
     content = '\n'.join(table_lines)
     
-    # === PHASE 5: Remove HTML/XML comments ===
-    
+    # === PHASE 4: Remove HTML comments ===
     content = re.sub(r'<>.*?</>', '', content, flags=re.DOTALL)
     content = re.sub(r'<!--.*?-->', '', content, flags=re.DOTALL)
-    content = re.sub(r'^\s*<>\s*$', '', content, flags=re.MULTILINE)
-    content = re.sub(r'^\s*</>\s*$', '', content, flags=re.MULTILINE)
     
-    # === PHASE 6: Fix headers ===
+    # === PHASE 5: Fix headers ===
     
+    # Ensure headers have space after #
     content = re.sub(r'^(#{1,6})([^\s#])', r'\1 \2', content, flags=re.MULTILINE)
-    content = re.sub(r'^(#{1,6}\s+.+?)\s*#+\s*$', r'\1', content, flags=re.MULTILINE)
     
-    # === PHASE 7: Clean links ===
+    # === PHASE 6: Clean whitespace ===
     
-    content = re.sub(r'\[([^\]]+)\]\s+\(([^\)]+)\)', r'[\1](\2)', content)
-    
-    # === PHASE 8: Fix specific document issues ===
-    
-    # Fix malformed brackets in tender titles
-    content = re.sub(r'\{\*\*\[', r'**[', content)
-    
-    # Fix double closing brackets in URLs
-    content = re.sub(r'(https?://[^\)]+)\)\)', r'\1)', content, flags=re.IGNORECASE)
-    
-    # Remove empty blockquotes
-    content = re.sub(r'^\s*>\s*$', '', content, flags=re.MULTILINE)
-    
-    # === PHASE 9: Clean whitespace ===
-    
+    # Remove trailing whitespace from lines
     lines = content.split('\n')
     content = '\n'.join([line.rstrip() for line in lines])
-    content = content.replace('\r\n', '\n')
+    
+    # Normalize line endings
+    content = re.sub(r'\r\n', '\n', content)
+    
+    # Remove excessive blank lines (max 2 consecutive)
     content = re.sub(r'\n{3,}', '\n\n', content)
-    content = content.rstrip() + '\n'
     
     return content
 
