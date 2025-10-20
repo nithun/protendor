@@ -129,7 +129,7 @@ def save_answers(session_name, answers):
 
 
 @frappe.whitelist()
-def generate_specification(session_name):
+def generate_specification_old(session_name):
     """Generate final specification document"""
     try:
         session = frappe.get_doc('Specification Session', session_name)
@@ -187,6 +187,124 @@ def generate_specification(session_name):
             'success': True,
             'spec_name': spec.name,
             'file_url': file_doc.file_url
+        }
+        
+    except Exception as e:
+        frappe.log_error(frappe.get_traceback(), 'Generate Specification Error')
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+@frappe.whitelist()
+def generate_specification(session_name):
+    """Generate final specification document in Markdown and PDF"""
+    try:
+        session = frappe.get_doc('Specification Session', session_name)
+        template = frappe.get_doc('Project Template', session.template)
+        
+        # Read template
+        template_content = read_file_content(template.template_file)
+        
+        # Prepare Q&A
+        qa_data = []
+        for q in session.questions:
+            if q.answer:
+                qa_data.append({
+                    'question': q.question_malay,
+                    'answer': q.answer
+                })
+        
+        # Get analysis result
+        analysis_result = json.loads(session.analysis_result) if session.analysis_result else {}
+        
+        # Generate markdown document
+        generated_content = generate_document_with_gemini(
+            template_content,
+            qa_data,
+            analysis_result
+        )
+        
+        # Create specification
+        spec = frappe.get_doc({
+            'doctype': 'Project Specification',
+            'project': session.project,
+            'session': session.name,
+            'specification_content': generated_content
+        })
+        spec.insert(ignore_permissions=True)
+        
+        # Save markdown file
+        md_filename = f"{session.project}-specification.md"
+        md_file_doc = save_as_markdown_file(
+            generated_content,
+            md_filename,
+            'Project Specification',
+            spec.name
+        )
+        
+        spec.markdown_file = md_file_doc.file_url
+        
+        # === NEW: Generate PDF ===
+        pdf_success = False
+        pdf_file_url = None
+        
+        try:
+            # Create temporary PDF file
+            import tempfile
+            import os
+            
+            # Create temp PDF path
+            temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+            temp_pdf_path = temp_pdf.name
+            temp_pdf.close()
+            
+            # Generate PDF from markdown
+            pdf_success, pdf_message = markdown_to_pdf_weasyprint(
+                generated_content,
+                temp_pdf_path
+            )
+            
+            if pdf_success:
+                # Save PDF to Frappe
+                pdf_filename = f"{session.project}-specification.pdf"
+                pdf_file_doc = save_pdf_to_frappe(
+                    temp_pdf_path,
+                    pdf_filename,
+                    'Project Specification',
+                    spec.name
+                )
+                
+                spec.pdf_file = pdf_file_doc.file_url
+                pdf_file_url = pdf_file_doc.file_url
+                
+                frappe.log(f"PDF generated successfully: {pdf_filename}")
+            else:
+                frappe.log_error(f"PDF generation failed: {pdf_message}")
+            
+            # Clean up temp file
+            if os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
+                
+        except Exception as pdf_error:
+            frappe.log_error(f"PDF generation error: {str(pdf_error)}\n{frappe.get_traceback()}")
+            pdf_success = False
+        
+        # Save spec with file URLs
+        spec.save(ignore_permissions=True)
+        
+        # Update session
+        session.status = 'Completed'
+        session.save(ignore_permissions=True)
+        
+        frappe.db.commit()
+        
+        return {
+            'success': True,
+            'spec_name': spec.name,
+            'markdown_file_url': md_file_doc.file_url,
+            'pdf_file_url': pdf_file_url,
+            'pdf_generated': pdf_success
         }
         
     except Exception as e:
@@ -1074,7 +1192,218 @@ If any information is not available, use reasonable defaults based on the contex
     
     return filled
 
+def markdown_to_pdf_weasyprint(markdown_content, output_path):
+    """Convert markdown to PDF using WeasyPrint"""
+    try:
+        import markdown
+        from weasyprint import HTML, CSS
+        from weasyprint.text.fonts import FontConfiguration
+        
+        # Convert markdown to HTML
+        html_content = markdown.markdown(
+            markdown_content,
+            extensions=['tables', 'fenced_code', 'nl2br', 'toc']
+        )
+        
+        # Create styled HTML document
+        styled_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <style>
+                @page {{
+                    size: A4;
+                    margin: 2cm;
+                    @bottom-right {{
+                        content: "Page " counter(page) " of " counter(pages);
+                        font-size: 9pt;
+                        color: #666;
+                    }}
+                }}
+                
+                body {{
+                    font-family: 'Arial', 'Helvetica', sans-serif;
+                    font-size: 11pt;
+                    line-height: 1.6;
+                    color: #333;
+                }}
+                
+                h1 {{
+                    font-size: 20pt;
+                    font-weight: bold;
+                    color: #2c3e50;
+                    margin-top: 0;
+                    margin-bottom: 12pt;
+                    page-break-after: avoid;
+                }}
+                
+                h2 {{
+                    font-size: 16pt;
+                    font-weight: bold;
+                    color: #34495e;
+                    margin-top: 18pt;
+                    margin-bottom: 10pt;
+                    page-break-after: avoid;
+                }}
+                
+                h3 {{
+                    font-size: 14pt;
+                    font-weight: bold;
+                    color: #34495e;
+                    margin-top: 14pt;
+                    margin-bottom: 8pt;
+                    page-break-after: avoid;
+                }}
+                
+                h4, h5, h6 {{
+                    font-size: 12pt;
+                    font-weight: bold;
+                    color: #34495e;
+                    margin-top: 12pt;
+                    margin-bottom: 6pt;
+                    page-break-after: avoid;
+                }}
+                
+                p {{
+                    margin: 8pt 0;
+                    text-align: justify;
+                }}
+                
+                table {{
+                    width: 100%;
+                    border-collapse: collapse;
+                    margin: 12pt 0;
+                    page-break-inside: avoid;
+                }}
+                
+                th {{
+                    background-color: #3498db;
+                    color: white;
+                    font-weight: bold;
+                    padding: 8pt;
+                    text-align: left;
+                    border: 1pt solid #2980b9;
+                }}
+                
+                td {{
+                    padding: 6pt 8pt;
+                    border: 1pt solid #bdc3c7;
+                }}
+                
+                tr:nth-child(even) {{
+                    background-color: #f8f9fa;
+                }}
+                
+                strong, b {{
+                    font-weight: bold;
+                    color: #2c3e50;
+                }}
+                
+                em, i {{
+                    font-style: italic;
+                }}
+                
+                ul, ol {{
+                    margin: 8pt 0;
+                    padding-left: 20pt;
+                }}
+                
+                li {{
+                    margin: 4pt 0;
+                }}
+                
+                blockquote {{
+                    margin: 12pt 0;
+                    padding: 8pt 12pt;
+                    background-color: #ecf0f1;
+                    border-left: 4pt solid #3498db;
+                    page-break-inside: avoid;
+                }}
+                
+                code {{
+                    font-family: 'Courier New', monospace;
+                    background-color: #f4f4f4;
+                    padding: 2pt 4pt;
+                    font-size: 10pt;
+                }}
+                
+                pre {{
+                    background-color: #f4f4f4;
+                    padding: 10pt;
+                    border-radius: 4pt;
+                    overflow-x: auto;
+                    page-break-inside: avoid;
+                }}
+                
+                a {{
+                    color: #3498db;
+                    text-decoration: none;
+                }}
+                
+                a:hover {{
+                    text-decoration: underline;
+                }}
+                
+                /* Prevent orphans and widows */
+                p, li, td {{
+                    orphans: 3;
+                    widows: 3;
+                }}
+                
+                /* Cover page styling */
+                .cover-page {{
+                    text-align: center;
+                    padding-top: 30%;
+                }}
+                
+                .cover-title {{
+                    font-size: 24pt;
+                    font-weight: bold;
+                    color: #2c3e50;
+                    margin-bottom: 20pt;
+                }}
+            </style>
+        </head>
+        <body>
+            {html_content}
+        </body>
+        </html>
+        """
+        
+        # Generate PDF
+        font_config = FontConfiguration()
+        html_doc = HTML(string=styled_html)
+        html_doc.write_pdf(output_path, font_config=font_config)
+        
+        return True, "PDF generated successfully"
+        
+    except Exception as e:
+        frappe.log_error(f"PDF generation error: {str(e)}\n{frappe.get_traceback()}")
+        return False, str(e)
 
+
+def save_pdf_to_frappe(pdf_path, filename, attached_to_doctype, attached_to_name):
+    """Save PDF to Frappe file system"""
+    try:
+        from frappe.utils.file_manager import save_file
+        
+        with open(pdf_path, 'rb') as f:
+            pdf_content = f.read()
+        
+        file_doc = save_file(
+            filename,
+            pdf_content,
+            attached_to_doctype,
+            attached_to_name,
+            is_private=0
+        )
+        
+        return file_doc
+        
+    except Exception as e:
+        frappe.log_error(f"Error saving PDF: {str(e)}")
+        raise
 
 def save_as_markdown_file(content, filename, attached_to_doctype, attached_to_name):
     """Save content as file in Frappe"""
