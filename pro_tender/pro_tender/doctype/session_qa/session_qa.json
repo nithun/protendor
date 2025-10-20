@@ -1,0 +1,58 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2025-10-19 14:59:31.717179",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "section_break_lcmm",
+  "question_malay",
+  "question_type",
+  "select_options",
+  "answer"
+ ],
+ "fields": [
+  {
+   "fieldname": "section_break_lcmm",
+   "fieldtype": "Section Break",
+   "options": "question_malay"
+  },
+  {
+   "fieldname": "question_malay",
+   "fieldtype": "Small Text",
+   "label": "Soalan"
+  },
+  {
+   "fieldname": "question_type",
+   "fieldtype": "Select",
+   "label": "Type",
+   "options": "Text\nSelect\nDate\nNumber"
+  },
+  {
+   "depends_on": "\"eval:doc.question_type=='Select'\"",
+   "fieldname": "select_options",
+   "fieldtype": "Long Text",
+   "label": "Options (JSON)"
+  },
+  {
+   "fieldname": "answer",
+   "fieldtype": "Long Text",
+   "label": "Jawapan"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2025-10-19 15:06:06.529807",
+ "modified_by": "Administrator",
+ "module": "Pro Tender",
+ "name": "Session QA",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

@@ -1,0 +1,38 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2025-10-19 12:47:27.139975",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "approvals",
+  "approval_file"
+ ],
+ "fields": [
+  {
+   "fieldname": "approvals",
+   "fieldtype": "Data",
+   "label": "Approvals "
+  },
+  {
+   "fieldname": "approval_file",
+   "fieldtype": "Attach",
+   "label": "Approval File"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2025-10-19 12:49:42.658492",
+ "modified_by": "Administrator",
+ "module": "Pro Tender",
+ "name": "ProjectApprovals",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
