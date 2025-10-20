@@ -195,6 +195,29 @@ class SpecGenerator {
                 margin-top: 1rem;
                 font-size: 16px;
             }
+
+            .download-buttons {
+                display: flex;
+                gap: 1rem;
+                justify-content: center;
+                flex-wrap: wrap;
+            }
+
+            .download-buttons .btn {
+                min-width: 200px;
+            }
+
+            .alert {
+                padding: 1rem;
+                border-radius: 8px;
+                margin-bottom: 1rem;
+            }
+
+            .alert-success {
+                background-color: #d4edda;
+                border: 1px solid #c3e6cb;
+                color: #155724;
+            }
             </style>
 
             <div class="spec-generator-page">
@@ -294,17 +317,7 @@ class SpecGenerator {
                             </button>
 
                             <div id="download-section" style="display: none;">
-                                <div class="alert alert-success">
-                                    ✓ Document successfully generated!
-                                </div>
-                                <a href="#" id="download-link" class="btn btn-primary btn-lg" download>
-                                    Download Document
-                                </a>
-                                <div class="mt-3">
-                                    <a href="#" id="view-spec-link" class="btn btn-link" target="_blank">
-                                        View Specification Document
-                                    </a>
-                                </div>
+                                <!-- Download content will be inserted here -->
                             </div>
                         </div>
                     </div>
@@ -592,23 +605,87 @@ class SpecGenerator {
             callback: (r) => {
                 this.hide_loading();
                 if (r.message && r.message.success) {
-                    this.show_download_link(r.message.file_url, r.message.spec_name);
+                    this.show_download_links(r.message);
+                    
+                    let message = 'Document generated successfully!';
+                    if (!r.message.pdf_generated) {
+                        message += ' (Note: PDF generation failed, but Markdown is available)';
+                    }
+                    
                     frappe.show_alert({
-                        message: 'Document generated successfully!',
+                        message: message,
                         indicator: 'green'
                     }, 5);
                 } else {
                     frappe.msgprint('Error: ' + (r.message?.error || 'Unknown'));
                 }
+            },
+            error: (err) => {
+                this.hide_loading();
+                frappe.msgprint('Error generating specification: ' + err.message);
             }
         });
     }
 
-    show_download_link(file_url, spec_name) {
-        this.page_content.find('#download-section').show();
-        this.page_content.find('#download-link').attr('href', file_url);
-        this.page_content.find('#view-spec-link').attr('href', `/app/project-specification/${spec_name}`);
+    show_download_links(result) {
+        const markdown_url = result.markdown_file_url;
+        const pdf_url = result.pdf_file_url;
+        const spec_name = result.spec_name;
+        
+        let download_html = `
+            <div class="alert alert-success">
+                <strong>✓ Success!</strong> Your specification document has been generated.
+            </div>
+            
+            <div class="download-buttons mb-4">
+        `;
+        
+        // Add markdown download button
+        if (markdown_url) {
+            download_html += `
+                <a href="${markdown_url}" 
+                   class="btn btn-primary btn-lg" 
+                   download
+                   target="_blank">
+                    <svg class="icon icon-sm" style="width: 16px; height: 16px; vertical-align: text-bottom;">
+                        <use href="#icon-file-text"></use>
+                    </svg>
+                    Download Markdown
+                </a>
+            `;
+        }
+        
+        // Add PDF download button
+        if (pdf_url) {
+            download_html += `
+                <a href="${pdf_url}" 
+                   class="btn btn-success btn-lg" 
+                   download
+                   target="_blank">
+                    <svg class="icon icon-sm" style="width: 16px; height: 16px; vertical-align: text-bottom;">
+                        <use href="#icon-file"></use>
+                    </svg>
+                    Download PDF
+                </a>
+            `;
+        }
+        
+        download_html += `
+            </div>
+            
+            <div class="text-center">
+                <a href="/app/project-specification/${spec_name}" 
+                   class="btn btn-link" 
+                   target="_blank">
+                    View in Project Specification →
+                </a>
+            </div>
+        `;
+        
+        // Hide generate button and show downloads
         this.page_content.find('#btn-generate-spec').hide();
+        this.page_content.find('#generation-status').hide();
+        this.page_content.find('#download-section').html(download_html).show();
     }
 
     go_to_step(step) {
